@@ -234,6 +234,117 @@ def main():
     lin_rmse = np.sqrt(lin_mse)
     print(lin_rmse)
 
+    ''' DECISION TREE '''
+    from sklearn.tree import DecisionTreeRegressor
+
+    tree_reg = DecisionTreeRegressor()
+    tree_reg.fit(housing_prepared, housing_labels) # train model
+    housing_predictions = tree_reg.predict(housing_prepared)
+    tree_mse = mean_squared_error(housing_labels, housing_predictions)
+    tree_rmse = np.sqrt(tree_mse)
+    print(tree_rmse)
+
+    ''' Cross Validation '''
+    from sklearn.model_selection import cross_val_score
+    scores = cross_val_score(tree_reg, housing_prepared, housing_labels, scoring = "neg_mean_squared_error", cv=10)
+    tree_rmse_scores = np.sqrt(-scores)
+
+    def display_scores(scores):
+        print("Scores:", scores)
+        print("Mean: ", scores.mean())
+        print("Standard Deviation: ", scores.std())
+
+    #display_scores(tree_rmse_scores)
+
+    lin_scores = cross_val_score(lin_reg, housing_prepared, housing_labels, scoring="neg_mean_squared_error", cv=10)
+    lin_rmse_scores = np.sqrt(-lin_scores)
+    #display_scores(lin_rmse_scores)
+
+    ''' Random Forest '''
+    from sklearn.ensemble import RandomForestRegressor
+
+    forest_reg = RandomForestRegressor()
+    forest_reg.fit(housing_prepared, housing_labels)
+    housing_predictions = forest_reg.predict(housing_prepared)
+    forest_mse = mean_squared_error(housing_labels, housing_predictions)
+    forest_rmse = np.sqrt(forest_mse)
+    print("Training set: ")
+    display_scores(-forest_rmse)
+
+    forest_scores = cross_val_score(forest_reg, housing_prepared, housing_labels, scoring="neg_mean_squared_error", cv=10)
+    forest_rmse_scores = np.sqrt(-forest_scores)
+    print("Validation set: ")
+    display_scores(forest_rmse_scores)
+
+    ''' Save models '''
+    #import joblib
+    #joblib.dump(my_model, "my_model.pkl")
+    #my_model_loaded = joblib.load("my_model.pkl")
+
+    ''' GRID SEARCH '''
+    # fiddles with hyperparameters for me
+    from sklearn.model_selection import GridSearchCV
+
+    param_grid = [
+        {'n_estimators': [3, 10, 30], 'max_features': [2,4,6,8]},
+        {'bootstrap': [False], 'n_estimators': [3,10], 'max_features':[2,3,4]},
+    ]
+    forest_reg = RandomForestRegressor()
+    grid_search = GridSearchCV(forest_reg, param_grid, cv=5,
+                               scoring='neg_mean_squared_error',
+                               return_train_score=True)
+    grid_search.fit(housing_prepared, housing_labels)
+
+    grid_search.best_params_
+    print(grid_search.best_params_) # Print best combination of parameters
+    print(grid_search.best_estimator_) # Print best estimator
+
+    # Print evaluation scores
+    cvres = grid_search.cv_results_
+    for mean_score, params in zip(cvres["mean_test_score"], cvres["params"]):
+        print(np.sqrt(-mean_score), params)
+
+    # Print feature importances
+    feature_importances = grid_search.best_estimator_.feature_importances_
+    #print(feature_importances)
+    extra_attribs = ["rooms)per)hhold", "pop_per_hhold", "bedrooms_per_room"]
+    cat_encoder = full_pipeline.named_transformers_["cat"]
+    cat_one_hot_attribs = list(cat_encoder.categories_[0])
+    attributes = num_attribs + extra_attribs + cat_one_hot_attribs
+    print(sorted(zip(feature_importances, attributes), reverse=True))
+
+    ''' EVALUATE ON TEST SET '''
+    final_model = grid_search.best_estimator_
+
+    X_test = strat_test_set.drop("median_house_value", axis=1)
+    y_test = strat_test_set["median_house_value"].copy()
+
+    X_test_prepared = full_pipeline.transform(X_test)
+
+    final_predictions = final_model.predict(X_test_prepared)
+
+    final_mse = mean_squared_error(y_test, final_predictions)
+    final_rmse = np.sqrt(final_mse)
+    print(final_rmse)
+
+    # Compute accuracy w/ confidence intervol
+    from scipy import stats
+    confidence = .95
+    squared_errors = (final_predictions - y_test) ** 2
+    print(np.sqrt(stats.t.interval(confidence, len(squared_errors) - 1,
+                             loc=squared_errors.mean(),
+                             scale=stats.sem(squared_errors))))
+
+
+
+
+    print("complete")
+
+
+
+
+
+
 
 
 
