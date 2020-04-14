@@ -138,6 +138,92 @@ def main():
     However, there are additional tests and hypertuning to be completed.  Overall costs of preparing data, making the series stationary, and selecting parameters will need to be considered for production.
     '''
 
+    ''' FEATURE EXTRACTION '''
+
+    # Create a copy of the initial dataframe to make various transformations
+    data = pd.DataFrame(Rev.Revenue.copy())
+    data.columns = ["y"]
+
+    # Adding the lag of the target variable from 2 to 6.  With more data, additional lags could be analyzed
+    for i in range(2, 6):
+        data["lag_{}".format(i)] = data.y.shift(i)
+
+    # for time-series cross-validation set 4 folds.
+    tscv = TimeSeriesSplit(n_splits=4)
+
+    y = data.dropna().y
+    X = data.dropna().drop(['y'], axis=1)
+
+    # reserve 30% of the data for testing
+    X_train, X_test, y_train, y_test = timeseries_train_test_split(X, y, test_size=0.3)
+
+    lr = LinearRegression()  # create linear regression
+    lr.fit(X_train, y_train)  # fit linear regression
+
+    # Using Lags as a feature produces better results than our time series did
+    # plotModelResults(lr, X_train, X_test, y_train, y_test, tscv,  plot_intervals=True, plot_anomalies=True)
+    # plotCoefficients(lr,  X_train)
+    # plt.show()
+
+    # Create additional features - month, quarter, month_of_quarter
+    data.index = pd.to_datetime(data.index)
+    data['month'] = data.index.month
+
+    data['quarter'] = data.index.quarter
+    data['month_of_quarter'] = data['month'] % 3
+    data.loc[(data.month_of_quarter == 0), 'month_of_quarter'] = 3
+
+    # plot additional features
+    # plt.figure(figsize=(16,5))
+    # plt.title("Encoded features")
+    # data.month.plot()
+    # data.quarter.plot()
+    # data.month_of_quarter.plot()
+    # plt.grid(True);
+
+    # Transform our features to have a standard scale
+    scaler = StandardScaler()
+
+    y = data.dropna().y
+    X = data.dropna().drop(['y'], axis=1)
+
+    X_train, X_test, y_train, y_test = timeseries_train_test_split(X, y, test_size=0.3)
+
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    lr = LinearRegression()
+    lr.fit(X_train_scaled, y_train)
+
+    # plot model results
+    # plotModelResults(lr, X_train=X_train_scaled, X_test=X_test_scaled, y_train=y_train, y_test=y_test, tscv=tscv, plot_intervals=True) # We find that month_of_quarter is a useful feature
+    # plotCoefficients(lr, X_train)
+    # plt.show()
+
+    # view monthly averages to see trends
+    # verage_month = code_mean(data, 'month', "y")
+    # plt.figure(figsize=(7,5))
+    # plt.title("month averages")
+    # pd.DataFrame.from_dict(average_month, orient='index')[0].plot()
+    # plt.grid(True);
+    # plt.show()
+
+    ''' PREPARE AND MODEL USING FEATURES EXPLORED ABOVE '''
+
+    X_train, X_test, y_train, y_test = prepareData(Rev.Revenue, lag_start=2, lag_end=5, test_size=0.3,
+                                                   target_encoding=True)
+
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    lr = LinearRegression()
+    lr.fit(X_train_scaled, y_train)
+
+    plotModelResults(lr, X_train=X_train_scaled, X_test=X_test_scaled, y_train=y_train, y_test=y_test, tscv=tscv,
+                     plot_intervals=True)
+    plotCoefficients(lr, X_train)
+    plt.show()
+
 
 
 
@@ -607,6 +693,142 @@ def plotSARIMA(s, d, series, model, n_steps):
     plt.plot(data.actual, label="actual")
     plt.legend()
     plt.grid(True);
+
+
+
+def timeseries_train_test_split(X, y, test_size):
+    """
+    :param X: features
+    :param y: target
+    :param test_size: number to withold
+    :return:training and test set
+    """
+
+    # get the index after which the test set starts
+    test_index = int(len(X)*(1-test_size))
+
+    X_train = X.iloc[:test_index]
+    y_train = y.iloc[:test_index]
+    X_test = X.iloc[test_index:]
+    y_test = y.iloc[test_index:]
+
+    return X_train, X_test, y_train, y_test
+
+
+def plotModelResults(model, X_train, X_test, y_train, y_test, tscv,  plot_intervals=False, plot_anomalies=False):
+    """
+    :param model: fit model
+    :param X_train: training set of features
+    :param X_test: testing set of features
+    :param y_train: training set of target
+    :param y_test: testing set of target
+    :param tscv: time series cross validation
+    :param plot_intervals: confidence intervals
+    :param plot_anomalies: anomalie detection/identification
+    :return: Plots modelled vs fact values, predition intervals and anomalies
+    """
+
+    prediction = model.predict(X_test)
+
+    plt.figure(figsize=(15, 7))
+    plt.plot(prediction, "g", label="prediction", linewidth=2.0)
+    plt.plot(y_test.values, label="actual", linewidth=2.0)
+
+    if plot_intervals:
+        cv = cross_val_score(model, X_train, y_train,
+                             cv=tscv,
+                             scoring="neg_mean_absolute_error")
+        mae = cv.mean() * (-1)
+        deviation = cv.std()
+
+        scale = 1.96
+        lower = prediction - (mae + scale * deviation)
+        upper = prediction + (mae + scale * deviation)
+
+        plt.plot(lower, "r--", label="upper bond / lower bond", alpha=0.5)
+        plt.plot(upper, "r--", alpha=0.5)
+
+        if plot_anomalies:
+            anomalies = np.array([np.NaN] * len(y_test))
+            anomalies[y_test < lower] = y_test[y_test < lower]
+            anomalies[y_test > upper] = y_test[y_test > upper]
+            plt.plot(anomalies, "o", markersize=10, label="Anomalies")
+
+    error = mean_absolute_percentage_error(prediction, y_test)
+    plt.title("Mean absolute percentage error {0:.2f}%".format(error))
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.grid(True);
+
+
+
+def plotCoefficients(model, X_train):
+    """
+    :param model: fit model
+    :return: returns plots of sorted coefficient values of the model
+    """
+
+    coefs = pd.DataFrame(model.coef_, X_train.columns)
+    coefs.columns = ["coef"]
+    coefs["abs"] = coefs.coef.apply(np.abs)
+    coefs = coefs.sort_values(by="abs", ascending=False).drop(["abs"], axis=1)
+
+    plt.figure(figsize=(15, 7))
+    coefs.coef.plot(kind='bar')
+    plt.grid(True, axis='y')
+    plt.hlines(y=0, xmin=0, xmax=len(coefs), linestyles='dashed');
+
+
+def code_mean(data, cat_feature, real_feature):
+    """
+    :param data: time series
+    :param cat_feature:
+    :param real_feature:
+    :return: Returns a dictionary where keys are unique categories of the cat_feature, and values are means over real_feature
+    """
+    return dict(data.groupby(cat_feature)[real_feature].mean())
+
+
+def prepareData(series, lag_start, lag_end, test_size, target_encoding=False):
+    """
+    :param series: pd.DataFrame - dataframe with time series
+    :param lag_start: int - initial step back in time to slice target varible; example - lag_start = 1 means that the model will see yesterday's values to predict today
+    :param lag_end: final step back in time to slice target variable; example - lag_end = 4 means that the model will see up to 4 days back in time to predict today
+    :param test_size: float - size of the test dataset after train/test split as percentage of data
+    :param target_encoding: boolean - if True - add target averages to the dataset
+    :return: dynamically prepares all data in ways explored prior in main function
+    """
+
+    # copy of the initial dataset
+    data = pd.DataFrame(series.copy())
+    data.columns = ["y"]
+
+    # lags of series
+    for i in range(lag_start, lag_end):
+        data["lag_{}".format(i)] = data.y.shift(i)
+
+    #datetime features
+    data.index = pd.to_datetime(data.index)
+    data['month'] = data.index.month
+    data['quarter'] = data.index.quarter
+    data['month_of_quarter'] = data['month']%3
+    data.loc[(data.month_of_quarter == 0), 'month_of_quarter'] = 3 # correct the month_of_quarter variable
+
+    if target_encoding:
+        # calculate averages on train set only
+        test_index = int(len(data.dropna())*(1-test_size))
+        data['month_average'] = list(map(code_mean(data[:test_index], 'month', "y").get, data.month))
+        #data['quarter_average'] = list(map(code_mean(data[:test_index], 'quarter', "y").get, data.quarter))
+
+        # drop encoded variables
+        data.drop(['month'], axis=1, inplace=True)
+
+    # train-test split
+    y = data.dropna().y
+    X = data.dropna().drop(['y'], axis=1)
+    X_train, X_test, y_train, y_test = timeseries_train_test_split(X, y, test_size=test_size)
+
+    return X_train, X_test, y_train, y_test
 
 
 main()
