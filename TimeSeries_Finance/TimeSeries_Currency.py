@@ -26,117 +26,174 @@ import scipy.stats as scs
 from itertools import product  # useful functions
 
 
-
-
 def main():
     """
     :return: Main program for Revenue Time Series Prediction
     This function iterates through each country listed in the currency.csv file, models using Holt Winters, SARIMA, and Linear Regression,
     then selects the model based on MAPE.  The final output of this model is printed to a CSV called final_output.
-
-    The data in the currency.csv file has been structured to have 27 records for each country, each record representing a month.  The Revenue
-    listed is fictional and selected values from https://www.kaggle.com/kashnitsky/topic-9-part-1-time-series-analysis-in-python/data,
-    which was initially a very different dataset.  The new dataset is used purely to demonstrate format & selected looping technique
     """
+
     # import relevant data
-    Revenue = pd.read_csv('Countries_CC.csv', index_col=['Date'], usecols=["Country", "Date", "Revenue"], parse_dates=['Date'])
+    Revenue = pd.read_csv('Countries_CC.csv', index_col=['Date'], usecols=["Country", "Date", "Revenue"],
+                          parse_dates=['Date'])
 
-    iterator = Revenue["Country"].unique()
-    n_preds = 12  # forecast 12 periods
+    iterator = Revenue["Country"].unique()  # create iterator, the unique identifier is Country
 
+    test_size = 0.2  # percentage of dataset to withhold for testing
+    minimum_records = 27  # number of records required.  For my example, I require 27 because I only have 27 record per cntry
+    hp_int = int(minimum_records * test_size)  # hold out period integer based on the test_size determined
+    n_preds = hp_int  # forecast n periods.  Setting equal to the hold-out period for now
 
     # set up output dataframe to for final Output
-    output = Revenue[Revenue["Country"] == iterator[0]].reset_index() # create dataframe to store temporary iteration results
-    output = output.drop(columns=['Country', 'Revenue']) # drop all but Date
-    extension = output.copy() # Create date dataframe for to-be offset
-    extension = extension.head(len(extension['Date']) - n_preds) # prepare extension for append
-    output.Date = output.Date + pd.DateOffset(months=n_preds) # offset output expected periods
-    output = extension.append(output)
-    output["Model"] = np.nan
-    output = output.set_index('Date')
-    final_output = pd.DataFrame(columns = ["Model", "y_hats", "Revenue", "Country"]) # final dataframe to store all iterated results
+    output = Revenue[
+        Revenue["Country"] == iterator[0]].reset_index()  # create dataframe to store temporary iteration results
+    output = output.drop(columns=['Country', 'Revenue'])  # drop all columns but Date
+    extension = output.copy()  # Create date dataframe for to-be offset
+    extension = extension.head(n_preds)  # prepare extension for append, taking the first n records
+    output.Date = output.Date + pd.DateOffset(months=n_preds)  # offset output by n_preds periods
+    output = extension.append(output)  # append the outputand extension
+    output["Model"] = np.nan  # create null Model field to store model selected
+    output = output.set_index('Date')  # set index to date
+    final_output = pd.DataFrame(
+        columns=["Model", "y_hats", "Revenue", "Country"])  # Create final_output with same fields
 
-
-
-
+    # iterate through each portion of the original dataframe using the iterator as the
     for i in iterator:
         print(i)
-        n_preds = 12
-        Rev = Revenue[Revenue["Country"]==i].drop(columns=['Country'])
 
-        #Rev = Revenue[Revenue["Country"] == "JAPAN"].drop(columns=['Country'])
+        # Rev = Revenue[Revenue["Country"]==i].drop(columns=['Country']) # create dataframe of specific iterator data
+        Rev = Revenue[Revenue["Country"] == "JAPAN"].drop(columns=['Country'])
 
-        if len(Rev) < 27:
+        if len(Rev) < minimum_records:
             print("Error: " + i + " does not contain enough records for modeling.")
-            break # breaks from For loop
+            break  # breaks from For loop
 
-        ''' HOLT WINTERS '''
+        ''' TRAINING - HOLT WINTERS '''
         '''TripleExponentialSmoothing - Holt Winters w/ Time Series Cross Validation'''
-        # Adds a third component, seasonality.  Avoid method if time series does not have seasonal trend.
-        data = Rev.Revenue[:-6] # remove data for testing
-        slen = 3  # 3 month(Quarterly) seasonality
+        ''' The Holt-Winters modeling applies smoothing to the intercept(level), to the trend by assuming that the future direction of the
+            series changes depends on the previous weighted changes, and by seasonality. '''
 
+        training_data = Rev.Revenue[:-hp_int]  # Remove the hold out period
+        testing_data = Rev.Revenue[-hp_int:]
+        slen = 3  # Set the seasonality length - with this dataset, we will assume 3 months(quarterly) seasonality
 
+        x = [0, 0, 0]  # alpha beta gamma list, preset to 0
+        # Optimize using cross-validation on a rolling basis & using mean squared log error as the loss function.
+        # truncated Newton (TNC) algorithm is selected for the minimizing function
+        opt = minimize(timeseriesCVscore, x0=x,
+                       args=(training_data, mean_squared_log_error, slen),
+                       method="TNC", bounds=((0, 1), (0, 1), (0, 1))
+                       )
 
-        x = [0, 0, 0]  # alpha beta gamma list
-        # Optimize using cross-validation on a rolling basis & modifying loss function
-        opt = minimize(timeseriesCVscore, x0 = x,
-                    args=(data, mean_squared_log_error, slen),
-                    method="TNC", bounds=((0, 1), (0, 1), (0, 1))
-                    )
-
-        alpha_final, beta_final, gamma_final = opt.x # store optimal values for model creation
+        alpha_final, beta_final, gamma_final = opt.x  # store optimal values for model creation
         print(alpha_final, beta_final, gamma_final)
 
-        model = HoltWinters(data, slen=slen,
+        # create Holtwinters model on training set
+        model = HoltWinters(training_data, slen=slen,
                             alpha=alpha_final,
                             beta=beta_final,
                             gamma=gamma_final,
                             n_preds=n_preds, scaling_factor=3)
 
-        model.triple_exponential_smoothing() # train and fit model, forecasting 12 months into the future
-        plotHoltWinters(model, Rev.Revenue)
+        model.triple_exponential_smoothing()  # fit model, forecasting with the training set months into the future
+        plotHoltWinters(n_preds, model, Rev.Revenue)  # plot the trained model with the actual data
+        plt.show()
+        # calculate the hw_error_hp - the MAPE on the Holdout Period
+        hw_error_hp = mean_absolute_percentage_error(testing_data, model.result[-n_preds:])
 
-
-
+        # calculate the hw_error - the MAPE on all actuals(training and testing)
         hw_error = mean_absolute_percentage_error(Rev.Revenue.values, model.result[:len(Rev.Revenue)])
-        #print("HW Error - Mean Absolute Percentage Error: {0:.2f}%".format(hw_error))
 
+        print()
 
-        ''' ARIMA MODEL '''
+        ''' TRAINING - SARIMA MODEL '''
+        ''' SARIMA(p,d,q)(P,D,Q,s) Seasonal Autoregression Moving Average model.
+
+            AR(p) - autoregression model, regression of the time series onto itself.  The basic assumption is that the 
+            current series values depend on its previous values with some lag(or several lags).  The maximum lag in
+            the model is referred to as p.  In the main_exploration() function we analyzed the PACF(Partial
+            AutoCorrelation Function) plot to find the biggest significant lag after which most other lags become
+            insignificant.
+
+            MA(q) - moving average model.  This models the error of the time series, again with the assumption that the
+            current error depends on the previous with some lag, q.  The initial value can be found on the ACF(Auto
+            Correlation Function) plot, allowing us to find the biggest significant prior lag after which most other
+            lags become insignificant.
+
+            ARMA(p,q) - Autoregressive-moving-average model.  If the series is already stationary, this model can be
+            used for approximation.
+
+            I(d) - order of integration. This is the number of nonseasonal differences needed to make the series
+            stationary.  We utilized the Dickey-Fuller test to determine that our series sample required 1,
+             we used first differences
+
+            ARIMA(p,d,q) model - can handle non-stationary data with the help of nonseasonal differences.
+
+            S(s) - this is responsible for the seasonality and equals the season period length of the series.
+                (P,D,Q) are the parameters for determining seasonality
+                P - order of autoregression for the seasonal component of the model, which can be derived from PACF.
+                    To determine, look at the number of significant lags, which are multiples of the season period length.
+                    For example, if there period equals 24 and we see the 24th and 48th lags are significant in PACF,
+                    our P=2.
+                Q - Similar logic using the ACF plot. Remember, the ACF plot is looking at lags multiple periods
+                    behind.
+                D - order of seasonal integration.  This can be equal to 1 or 0, depending on whether seasonal
+                    differences were applied or not.
+
+           SARIMA(p,d,q)(P,D,Q,s) Seasonal Autoregression Moving Average model.'''
+
+        training_data = training_data.to_frame()
+        testing_data = testing_data.to_frame()
+
         # setting initial values and some bounds for them
-        ps = range(2, 5)
-        d = 1 # number of differences
-        qs = range(2, 5)
-        Ps = range(0, 2)
-        D = 1
-        Qs = range(0, 2)
-        s = 3  # season length is still 3
-        n_preds = 3 # forecast 3 periods for ARIMA model
+        ps = range(2, 5)  # AR(p) - The maximum lag in the model found on the PACF plot
+        d = 1  # number of differences for the order of integration
+        qs = range(2, 5)  # The final significant lag found on the ACF plot
+        Ps = range(0, 2)  # Order of autoregression for the seasonal component of the model, derived from PACF
+        D = 1  # Order of seasonal integration.  Seasonal differences are applied
+        Qs = range(0, 2)  # Order of autoregression for the seasonal component of the model, dervied from ACF
+        s = slen  # season length is still 3
+        #  n_preds = 3  # forecast periods for ARIMA model
 
         # creating list with all the possible combinations of parameters
-        parameters = product(ps, qs, Ps, Qs)
+        parameters = product(ps, qs, Ps, Qs)  # multiplies each range to determine all possible combinations
         parameters_list = list(parameters)
 
-        result_table = optimizeSARIMA(Rev, parameters_list, d, D, s) # Determine optimal combination - (4,2,1,1) with AIC of 899.7659
+        result_table = optimizeSARIMA(training_data.Revenue, parameters_list, d, D,
+                                      s)  # Determine optimal combination -  AIC is the minimization function
 
-        ## set the parameters that give the lowest AIC
-        p, q, P, Q = result_table.parameters[0]
+        p, q, P, Q = result_table.parameters[0]  # set the parameters that give the lowest AIC
 
-        best_model = sm.tsa.statespace.SARIMAX(Rev.Revenue, order=(p, d, q), seasonal_order=(P, D, Q, s)).fit(disp=-1)
-        #print(best_model.summary())
-        sarima_model = plotSARIMA(s, d, Rev, best_model, n_preds) # plots SARIMA Model and returns numpy array of results
-        sarima_results = sarima_model.tolist() # remove dates so that error can be calculated
-        sarima_nulls = sum(isnan(x) for x in sarima_results) # number of nulls to remove, as model results were shifted due to differentiating
+        best_model = sm.tsa.statespace.SARIMAX(training_data.Revenue, order=(p, d, q), seasonal_order=(P, D, Q, s)).fit(
+            disp=-1)
 
-        sarima_error = mean_absolute_percentage_error(Rev.Revenue.values[sarima_nulls:], sarima_results[sarima_nulls:len(Rev.Revenue)]) # calculate SARIMA mape error
+        # timeseriesCVscore_sarima()
+
+        sarima_model = plotSARIMA(s, d, training_data, best_model, Rev.Revenue,
+                                  n_preds)  # plots SARIMA Model and returns numpy array of results
+
+        sarima_results = sarima_model.tolist()  # remove dates so that error can be calculated
+        sarima_nulls = sum(isnan(x) for x in
+                           sarima_results)  # number of nulls to remove, as model results were shifted due to differentiating
+
+        sarima_error = mean_absolute_percentage_error(Rev.Revenue.values[sarima_nulls:], sarima_results[
+                                                                                         sarima_nulls:len(
+                                                                                             Rev.Revenue)])  #
+        # calculate SARIMA mape error
+
+        sarima_error_hp = mean_absolute_percentage_error(testing_data.Revenue.values, sarima_results[-hp_int:])  #
+        # calculate SARIMA mape error of test set
 
         ''' LINEAR REGRESSION '''
+        ''' Description of Linear Regression
+
+        '''
         scaler = StandardScaler()
-        tscv = TimeSeriesSplit(n_splits=4) # for time-series cross-validation set 4 folds.
+        tscv = TimeSeriesSplit(n_splits=3)  # for time-series cross-validation set 4 folds.
 
         # Prepare data creates Lag features, month_of_quarter, and monthly average features
-        X_train, X_test, y_train, y_test = prepareData(Rev.Revenue, lag_start=2, lag_end=6, test_size=0.3, target_encoding=True)
+        X_train, X_test, y_train, y_test = prepareData(Rev.Revenue, lag_start=2, lag_end=6, test_size=test_size,
+                                                       target_encoding=True)
 
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
@@ -146,56 +203,80 @@ def main():
         prediction = lr.predict(X_test_scaled)
         lr_error = mean_absolute_percentage_error(prediction, y_test)
 
-
-        plotModelResults(i+" Linear Regression - ", lr, X_train=X_train_scaled, X_test=X_test_scaled, y_train=y_train, y_test=y_test, tscv=tscv, plot_intervals=True)
+        plotModelResults(i + " Linear Regression - ", lr, X_train=X_train_scaled, X_test=X_test_scaled, y_train=y_train,
+                         y_test=y_test, tscv=tscv, plot_intervals=True)
         plotCoefficients(lr, X_train)
         plt.show()
 
-
+        ''' SELECT MODEL AND ADD FORECAST TO FINAL OUTPUT '''
+        ''' ERROR is calculated as MAPE(Mean Absolute Percentage of Error) on the Training set, which is defined
+            as test_size which indicates the percentage to be used on the hold out period'''
         error_dict = {
-            "hw" : hw_error,
-            "sarima" : sarima_error,
-            "lr" : lr_error
+            "hw": hw_error_hp,
+            "sarima": sarima_error_hp,
+            "lr": lr_error
         }
-        print(i + " HW Error - Mean Absolute Percentage Error: {0:.2f}%".format(hw_error))
-        print(i + " SARIMA Error - Mean Absolute Percentage Error: {0:.2f}%".format(sarima_error))
+        print(i + " HW Error - Mean Absolute Percentage Error: {0:.2f}%".format(hw_error_hp))
+        print(i + " SARIMA Error - Mean Absolute Percentage Error: {0:.2f}%".format(sarima_error_hp))
         print(i + " Linear Regression Error - Mean Absolute Percentage Error: {0:.2f}%".format(lr_error))
         temp = min(error_dict.values())
         res = [key for key in error_dict if error_dict[key] == temp]
 
-
         if res[0] == "hw":
+            # create Final Holtwinters model using all data
+            model = HoltWinters(Rev.Revenue, slen=slen,
+                                alpha=alpha_final,
+                                beta=beta_final,
+                                gamma=gamma_final,
+                                n_preds=(n_preds), scaling_factor=3)
+
+            model.triple_exponential_smoothing()  # fit Final Model
+
             temp_list = model.result  # create list of HW model results
-            t = [0.0] * (len(output.index) - len(model.result))  # create empty list the length of the difference betwee HW results and output index
+            t = [0.0] * (len(output.index) - len(
+                model.result))  # create empty list the length of the difference betwee HW results and output index
             temp_list.extend(t)  # extend list so that it is the same size as output
             hw_result = np.asarray(temp_list)  # send to array
-            y_hats_df = pd.DataFrame(data=hw_result, columns=['y_hats'], index=output.index.copy())  # Create dataframe with predicted values from HW
-            df_out = pd.merge(output, y_hats_df, how='left', left_index=True, right_index=True)  # Merge predicted values with output dataframe containing dates
+            y_hats_df = pd.DataFrame(data=hw_result, columns=['y_hats'],
+                                     index=output.index.copy())  # Create dataframe with predicted values from HW
+            df_out = pd.merge(output, y_hats_df, how='left', left_index=True,
+                              right_index=True)  # Merge predicted values with output dataframe containing dates
             df_out = pd.merge(df_out, Rev, how='left', left_index=True, right_index=True)  # Merge actual values
             df_out['Country'] = i  # Store the iterator into Country Column
             df_out['Model'] = "Holt Winters"
+            print()
 
         elif res[0] == "sarima":
+
+            best_model = sm.tsa.statespace.SARIMAX(Rev.Revenue, order=(p, d, q),
+                                                   seasonal_order=(P, D, Q, s)).fit(disp=-1)
+            sarima_forecast = best_model.predict(start=Rev.shape[0], end=Rev.shape[0] + (n_preds - 1))
+            sarima_forecast = Rev.Revenue.append(sarima_forecast)
+            sarima_results = sarima_forecast.to_numpy()
+
             t = [0.0] * (len(output.index) - len(sarima_results))
             sarima_results = np.append(sarima_results, t)
-            y_hats_df = pd.DataFrame(data=sarima_results, columns=['y_hats'], index= output.index.copy()) # Create dataframe with predicted values from HW
-            df_out = pd.merge(output, y_hats_df, how='left', left_index=True, right_index=True) # Merge predicted values with output dataframe containing dates
-            df_out = pd.merge(df_out, Rev, how='left', left_index=True, right_index=True) # Merge actual values
-            df_out['Country'] = i # Store the iterator into Country Column
+            y_hats_df = pd.DataFrame(data=sarima_results, columns=['y_hats'],
+                                     index=output.index.copy())  # Create dataframe with predicted values from HW
+            df_out = pd.merge(output, y_hats_df, how='left', left_index=True,
+                              right_index=True)  # Merge predicted values with output dataframe containing dates
+            df_out = pd.merge(df_out, Rev, how='left', left_index=True, right_index=True)  # Merge actual values
+            df_out['Country'] = i  # Store the iterator into Country Column
             df_out['Model'] = "SARIMA"
 
         elif res[0] == "lr":
-            y_hats_df = pd.DataFrame(data=prediction, columns=['y_hats'], index=X_test.index.copy()) # Create dataframe with predicted values from LR
-            df_out = pd.merge(output, y_hats_df, how='left', left_index=True, right_index=True) # Merge predicted values with output dataframe containing dates
-            df_out = pd.merge(df_out, Rev, how='left', left_index=True, right_index=True) # Merge actual values
-            df_out['Country'] = i # Store the iterator into Country Column
+            y_hats_df = pd.DataFrame(data=prediction, columns=['y_hats'],
+                                     index=X_test.index.copy())  # Create dataframe with predicted values from LR
+            df_out = pd.merge(output, y_hats_df, how='left', left_index=True,
+                              right_index=True)  # Merge predicted values with output dataframe containing dates
+            df_out = pd.merge(df_out, Rev, how='left', left_index=True, right_index=True)  # Merge actual values
+            df_out['Country'] = i  # Store the iterator into Country Column
             df_out['Model'] = "Linear Regression"
 
         if len(final_output.index) == 0:
             final_output = df_out.copy()
         else:
-            final_output = final_output.append(df_out) # append df_out to final output
-
+            final_output = final_output.append(df_out)  # append df_out to final output
 
     print(final_output.head())
     final_output.to_csv('final_output.csv')
